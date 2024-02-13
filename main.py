@@ -12,8 +12,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC  # noqa
 
-TEST_URL = "https://www.jeremyjordan.me/autoencoders/"  # noqa
-
 BASE_HEADER = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
     "Accept-Language": "en-US,en;q=0.5",
@@ -60,8 +58,8 @@ def get_header(content_type, referrer=None):
 
 
 def get_content(response):
-    if response.headers.get('Transfer-Encoding') == 'chunked':
-        content = b''
+    if response.headers.get("Transfer-Encoding") == "chunked":
+        content = b""
         for r in response.iter_content(1024):
             content += r
     else:
@@ -69,13 +67,17 @@ def get_content(response):
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError:
-        return base64.b64encode(content).decode('utf-8')
+        return base64.b64encode(content).decode("utf-8")
 
 
 def is_svg(url):
     # there might be some parameters in the url
     path = urlparse(url).path
     return path.endswith(".svg")
+
+
+def is_document_ready(driver):
+    return driver.execute_script("return document.readyState") == "complete"
 
 
 class Scraper:
@@ -101,7 +103,7 @@ class Scraper:
         # content = get_content(response)
         self.driver.get(url)
         wait = WebDriverWait(self.driver, 10)
-        wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+        wait.until(is_document_ready)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         # Extract HTML content
         content = self.driver.page_source
