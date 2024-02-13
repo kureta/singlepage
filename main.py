@@ -1,50 +1,86 @@
 import base64
-from dataclasses import dataclass
+import html
+from enum import Enum
+from urllib.parse import urljoin, urlparse
 
-from selenium import webdriver
+import requests
 from bs4 import BeautifulSoup
+from loguru import logger
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC  # noqa
 
-from selenium.common import JavascriptException, WebDriverException
+TEST_URL = "https://www.jeremyjordan.me/autoencoders/"  # noqa
 
-TEST_URL = "https://www.saaspegasus.com/guides/modern-javascript-for-django-developers/apis/"
-
-
-@dataclass
-class SinglePage:
-    title: str
-    url: str
-    html_content: str
-    screenshot: bytes
-
-    def save_html(self, file_path: str):
-        with open(file_path, "w") as file:
-            file.write(self.html_content)
-
-    def save_screenshot(self, file_path: str):
-        with open(f"{file_path}.pdf", "wb") as file:
-            file.write(self.screenshot)
-
-
-# TODO: js escape some characters
-def safely_execute_js(func):
-    def wrapper_safely_execute_js(self, resource_url):
-        if resource_url.startswith("data:"):
-            return resource_url
-        if not resource_url.startswith("http"):
-            resource_url = self.driver.execute_script(
-                f"return new URL('{resource_url}', window.location.href).href"
-            )
-        try:
-            return func(self, resource_url)
-        except (JavascriptException, WebDriverException) as e:
-            print(f'Error downloading resource: {resource_url}', e.msg)
-            return ""
-
-    return wrapper_safely_execute_js
+BASE_HEADER = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-GPC": "1",
+}
 
 
-class SinglePageDownloader:
+class ContentType(Enum):
+    HTML = 1
+    CSS = 2
+    JS = 3
+    IMG = 4
+    FONT = 5
+    AUDIO = 6
+    VIDEO = 7
+    IFRAME = 8
+
+
+accept = {
+    ContentType.HTML: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    ContentType.IMG: "image/avif,image/webp,*/*",
+    ContentType.JS: "*/*",
+    ContentType.CSS: "text/css,*/*;q=0.1",
+    ContentType.FONT: "application/font-woff2;q=1.0,application/font-woff;q=0.9,*/*;q=0.8",
+    ContentType.AUDIO: "audio/*",
+    ContentType.VIDEO: "video/*",
+    ContentType.IFRAME: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+}
+
+
+def get_header(content_type, referrer=None):
+    header = BASE_HEADER.copy()
+    if referrer:
+        header.update({"Referrer": referrer})
+    header.update({"Accept": accept[content_type]})
+    return header
+
+
+def get_content(response):
+    if response.headers.get('Transfer-Encoding') == 'chunked':
+        content = b''
+        for r in response.iter_content(1024):
+            content += r
+    else:
+        content = response.content
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return base64.b64encode(content).decode('utf-8')
+
+
+def is_svg(url):
+    # there might be some parameters in the url
+    path = urlparse(url).path
+    return path.endswith(".svg")
+
+
+class Scraper:
     def __init__(self):
+        self.session = requests.Session()
+
         # Set up headless Chrome browser
         options = webdriver.ChromeOptions()
         options.add_argument("--headless")
@@ -56,89 +92,75 @@ class SinglePageDownloader:
         # Close the browser
         self.driver.quit()
 
-    @safely_execute_js
-    def fetch_image(self, resource_url):
-        return self.driver.execute_script(
-            f"return fetch('{resource_url}', {{cache: 'force-cache'}}).then(response => response.blob())"
-            f".then(blob => new Promise((resolve, reject) => {{"
-            f"    const reader = new FileReader();"
-            f"    reader.onloadend = () => resolve(reader.result);"
-            f"    reader.onerror = reject;"
-            f"    reader.readAsDataURL(blob);"
-            f"}}));"
-        )
-
-    @safely_execute_js
-    def fetch_text(self, resource_url):
-        return self.driver.execute_script(
-            f"return fetch('{resource_url}', {{cache: 'force-cache'}}).then(response => response.text());"
-        )
-
-    @safely_execute_js
-    def fetch_iframe(self, iframe_url):
-        return self.fetch_html(iframe_url)
-
     def fetch_html(self, url):
-        # Navigate to webpage
+        logger.debug(f"Fetching html content from {url}")
+        # self.session.headers = get_header(ContentType.HTML)
+        # response = self.session.get(url, stream=True)
+        #
+        # content = get_content(response)
         self.driver.get(url)
+        wait = WebDriverWait(self.driver, 10)
+        wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         # Extract HTML content
-        html_content = self.driver.page_source
-        # Parse HTML content
-        soup = BeautifulSoup(html_content, "html.parser")
+        content = self.driver.page_source
 
-        # Get base64 encoded data for all resources (CSS, JS, images)
-        for tag in soup.find_all(["link", "script", "img", "audio", "video", "iframe"]):
-            if tag.name in ["img", "audio", "video"] and tag.get("src"):
+        soup = BeautifulSoup(content, "lxml")
+
+        for tag in soup.find_all(["link", "script", "img", "iframe"]):
+            if tag.name in ["img"] and tag.get("src"):
                 img_url = tag["src"]
-                tag["src"] = self.fetch_image(img_url)
+                img_data = self.fetch_data(ContentType.IMG, img_url, url)
+                # if it is a base64 encoded image, we can directly embed it
+                if img_data.startswith("data:"):
+                    logger.debug(f"Embedding base64 image {img_url}")
+                    tag["src"] = img_data
+                # if its is svg, we can directly embed it
+                elif is_svg(img_url):
+                    logger.debug(f"Embedding svg image {img_url}")
+                    # parse the svg content and embed it
+                    svg_soup = BeautifulSoup(img_data, "lxml")
+                    # replace with svg tag
+                    tag.replace_with(svg_soup.find("svg"))
+                else:
+                    tag["src"] = f"data:image/jpeg;base64,{img_data}"
             elif tag.name == "script" and tag.get("src"):
                 js_url = tag["src"]
-                tag.string = self.fetch_text(js_url)
+                tag.string = html.escape(self.fetch_data(ContentType.JS, js_url, url))
                 del tag["src"]
-            # TODO: link/font
             elif tag.name == "link" and tag.get("rel") == ["stylesheet"] and tag.get("href"):
                 css_url = tag["href"]
                 style_tag = soup.new_tag("style")
-                style_tag.string = self.fetch_text(css_url)
+                sheet = self.fetch_data(ContentType.CSS, css_url, url)
+                style_tag.string = sheet
                 tag.replace_with(style_tag)
-            elif tag.name == "iframe" and tag.get("src"):
-                # Assume absolute path because I am lazy.
-                iframe_url = tag["src"]
-                iframe_content = self.fetch_iframe(iframe_url)
-                tag.replace_with(iframe_content)
+            # elif tag.name == "iframe" and tag.get("src"):
+            #     iframe_url = tag["src"]
+            #     iframe_content = self.fetch_html(iframe_url)
+            #     tag.replace_with(iframe_content)
 
-        # Now html_content contains the HTML page with embedded resources
         return soup.prettify()
 
-    def get_single_page(self, url):
-        # Navigate to webpage
-        self.driver.get(url)
-        title = self.driver.title
-        # screenshot = self.driver.get_screenshot_as_png()
-        screenshot = self.driver.print_page()
-        screenshot = base64.b64decode(screenshot)
+    def fetch_data(self, content_type, url, referrer=None):
+        if not url.startswith("http"):
+            url = urljoin(referrer, url)
+        logger.debug(f"Fetching {content_type} from {url} (referrer {referrer})")
+        self.session.headers = get_header(content_type, referrer)
+        try:
+            response = self.session.get(url, stream=True)
+        except Exception as e:
+            logger.error(f"Failed to fetch {url} with error {e}")
+            return ""
 
-        # This is where we process the html source to embed all resources
-        html_content = self.fetch_html(url)
-
-        result = SinglePage(
-            title=title,
-            url=url,
-            html_content=html_content,
-            screenshot=screenshot,
-        )
-
-        return result
+        return get_content(response)
 
 
 def main():
-    # Create an instance of SinglePage
-    downloader = SinglePageDownloader()
-    # Fetch the HTML content of the webpage
-    single_page = downloader.get_single_page(TEST_URL)
+    scraper = Scraper()
+    html_content = scraper.fetch_html(TEST_URL)
 
-    single_page.save_html("pytorch.html")
-    single_page.save_screenshot("pytorch")
+    with open("output.html", "w") as f:
+        f.write(html_content)
 
 
 if __name__ == '__main__':
