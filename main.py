@@ -23,7 +23,7 @@ class SinglePage:
             )
         try:
             img_data = self.driver.execute_script(
-                f"return fetch('{resource_url}').then(response => response.blob()).then(blob => new Promise((resolve, reject) => {{"
+                f"return fetch('{resource_url}', {{cache: 'force-cache'}}).then(response => response.blob()).then(blob => new Promise((resolve, reject) => {{"
                 f"    const reader = new FileReader();"
                 f"    reader.onloadend = () => resolve(reader.result);"
                 f"    reader.onerror = reject;"
@@ -31,6 +31,7 @@ class SinglePage:
                 f"}}));"
             )
         except JavascriptException:
+            print(f"Failed to fetch image {resource_url}")
             img_data = ""
         return img_data
 
@@ -41,9 +42,10 @@ class SinglePage:
             )
         try:
             content = self.driver.execute_script(
-                f"return fetch('{resource_url}').then(response => response.text());"
+                f"return fetch('{resource_url}', {{cache: 'force-cache'}}).then(response => response.text());"
             )
         except JavascriptException:
+            print(f"Failed to fetch text {resource_url}")
             content = ""
         return content
 
@@ -56,7 +58,7 @@ class SinglePage:
         soup = BeautifulSoup(html_content, "html.parser")
 
         # Get base64 encoded data for all resources (CSS, JS, images)
-        for tag in soup.find_all(["link", "script", "img"]):
+        for tag in soup.find_all(["link", "script", "img", "iframe"]):
             if tag.name == "img" and tag.get("src"):
                 img_url = tag["src"]
                 tag["src"] = self.fetch_image(img_url)
@@ -69,6 +71,11 @@ class SinglePage:
                 style_tag = soup.new_tag("style")
                 style_tag.string = self.fetch_text(css_url)
                 tag.replace_with(style_tag)
+            elif tag.name == "iframe" and tag.get("src"):
+                # Assume absolute path because I am lazy.
+                iframe_url = tag["src"]
+                iframe_content = self.fetch_html(iframe_url)
+                tag.replace_with(iframe_content)
 
         # Now html_content contains the HTML page with embedded resources
         return soup.prettify()
