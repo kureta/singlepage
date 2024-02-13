@@ -110,13 +110,15 @@ class Scraper:
         for tag in soup.find_all(["link", "script", "img", "iframe"]):
             if tag.name in ["img"] and tag.get("src"):
                 img_url = tag["src"]
-                img_data = self.fetch_data(ContentType.IMG, img_url, url)
                 # if it is a base64 encoded image, we can directly embed it
-                if img_data.startswith("data:"):
+                if img_url.startswith("data:"):
                     logger.debug(f"Embedding base64 image {img_url}")
-                    tag["src"] = img_data
+                    tag["src"] = img_url
+                    continue
+
                 # if its is svg, we can directly embed it
-                elif is_svg(img_url):
+                img_data = self.fetch_data(ContentType.IMG, img_url, url)
+                if is_svg(img_url):
                     logger.debug(f"Embedding svg image {img_url}")
                     # parse the svg content and embed it
                     svg_soup = BeautifulSoup(img_data, "lxml")
