@@ -3,6 +3,7 @@ import html
 from enum import Enum
 from urllib.parse import urljoin, urlparse
 
+import click
 import requests
 from bs4 import BeautifulSoup
 from loguru import logger
@@ -157,13 +158,22 @@ class Scraper:
         return get_content(response)
 
 
-def main():
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.argument("url")
+def scrape(url: str):
     scraper = Scraper()
-    html_content = scraper.fetch_html(TEST_URL)
+    html_content = scraper.fetch_html(url)
 
     with open("output.html", "w") as f:
         f.write(html_content)
 
+    logger.info("HTML content saved to output.html")
 
-if __name__ == '__main__':
-    main()
+
+if __name__ == "__main__":
+    cli()
