@@ -7,7 +7,7 @@ import click
 import requests
 from bs4 import BeautifulSoup
 from loguru import logger
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 from playwright_stealth import stealth_sync
 
 BASE_HEADER = {
@@ -87,37 +87,43 @@ def is_svg(url):
 
 
 class Scraper:
-    def __init__(self, page):
+    def __init__(self, page: Page):
         self.session = requests.Session()
 
         self.page = page
         stealth_sync(self.page)
 
+    def save_screenshot(self, path):
+        logger.debug(f"Saving screenshot to {path}")
+        self.page.screenshot(path=path, full_page=True)
+
+    def save_pdf(self, path):
+        logger.debug(f"Saving pdf to {path}")
+        client = self.page.context.new_cdp_session(self.page)
+        data = client.send("Page.printToPDF", {"landscape": False, "displayHeaderFooter": False})
+        with open(path, 'wb') as f:
+            f.write(base64.b64decode(data["data"]))
+
     def fetch_html(self, url):
         logger.debug(f"Fetching html content from {url}")
 
+        # load page
         self.page.goto(url)
         self.page.wait_for_load_state("networkidle")
+        content = self.page.content()
+
+        # get title
+        title = self.page.title()
+        # make filename
+        path = title[:128] if title else urlparse(url).path[:128]
 
         # save screenshot
-        self.page.screenshot(path='output.png', full_page=True)
-
+        self.save_screenshot(f"{path}.png")
         # save pdf
-        client = self.page.context.new_cdp_session(self.page)
-        data = client.send("Page.printToPDF", {"landscape": False, "displayHeaderFooter": False})
-        with open('output.pdf', 'wb') as f:
-            f.write(base64.b64decode(data["data"]))
+        self.save_pdf(f'{path}.pdf')
 
-        # get html content after all resources are loaded
-        content = self.page.evaluate('''() => {
-            return document.documentElement.outerHTML;
-        }''')
-
+        # parse html content
         soup = BeautifulSoup(content, "lxml")
-
-        # Create a new BeautifulSoup object for the DOCTYPE declaration
-        doctype_soup = BeautifulSoup('<!DOCTYPE html>', "lxml")
-        soup.insert(0, doctype_soup)
 
         loaded = []
         for tag in soup.find_all(["link", "script", "img"]):
@@ -159,10 +165,11 @@ class Scraper:
                 sheet = self.fetch_data(ContentType.CSS, css_url, url)
                 style_tag.string = sheet
                 tag.replace_with(style_tag)
-            # elif tag.name == "iframe" and tag.get("src"):
-            #     iframe_url = tag["src"]
-            #     iframe_content = self.fetch_html(iframe_url)
-            #     tag.replace_with(iframe_content)
+            elif tag.name == "iframe" and tag.get("src"):
+                logger.warning(f"NOT IMPLEMENTED: Embedding iframe {urlparse(tag['src']).path}")
+                # iframe_url = tag["src"]
+                # iframe_content = self.fetch_html(iframe_url)
+                # tag.replace_with(iframe_content)
 
         logger.debug(f"Loaded {len(loaded)} elements")
         return soup.prettify()
@@ -200,6 +207,7 @@ def scrape(url: str):
         '--window-position=-10,0',
     ]
     ignoreDefaultArgs = ['--enable-automation']
+
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
             user_data_dir='/home/kureta/.cache/chromium/scraper-profile',
@@ -207,6 +215,7 @@ def scrape(url: str):
             headless=True,
             viewport={'width': 1920, 'height': 1080}
         )
+
         page = browser.new_page()
         scraper = Scraper(page)
         html_content = scraper.fetch_html(url)
