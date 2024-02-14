@@ -1,15 +1,14 @@
 import base64
-import html
+import time
 from enum import Enum
 from urllib.parse import urljoin, urlparse
 
+import brotli
 import click
 import requests
 from bs4 import BeautifulSoup
 from loguru import logger
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC  # noqa
 
 BASE_HEADER = {
@@ -26,6 +25,7 @@ BASE_HEADER = {
 }
 
 
+# TODO: implement other content types
 class ContentType(Enum):
     HTML = 1
     CSS = 2
@@ -47,6 +47,17 @@ accept = {
     ContentType.VIDEO: "video/*",
     ContentType.IFRAME: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 }
+
+
+def sanitize_inline_js(html_content):
+    # TODO: Also remove events, don't know why
+    # Remove event attributes such as onclick, onmouseover, etc.
+    # sanitized_content = re.sub(r"\bon\w+\s*=\s*['\"].*?['\"]", "", html_content, flags=re.IGNORECASE)
+
+    # Escape JavaScript content by replacing < and > with HTML entities
+    sanitized_content = html_content.replace("<", "&lt;").replace(">", "&gt;")
+
+    return sanitized_content
 
 
 def get_header(content_type, referrer=None):
@@ -76,10 +87,6 @@ def is_svg(url):
     return path.endswith(".svg")
 
 
-def is_document_ready(driver):
-    return driver.execute_script("return document.readyState") == "complete"
-
-
 class Scraper:
     def __init__(self):
         self.session = requests.Session()
@@ -88,8 +95,14 @@ class Scraper:
         options = webdriver.ChromeOptions()
         options.add_argument("--headless")
         options.add_argument("--disable-gpu")
-        options.add_argument("--user-data-dir=/home/kureta/.cache/chromium/scraper-profile")
+        # TODO: using tmpdir causes errors, find out why.
+        options.add_argument(
+            "--user-data-dir=/home/kureta/.cache/chromium/scraper-profile"
+        )
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-notifications")
         self.driver = webdriver.Chrome(options=options)
+        self.driver.set_window_size(1920, 1080)
 
     def __del__(self):
         # Close the browser
@@ -97,43 +110,54 @@ class Scraper:
 
     def fetch_html(self, url):
         logger.debug(f"Fetching html content from {url}")
-        # self.session.headers = get_header(ContentType.HTML)
-        # response = self.session.get(url, stream=True)
-        #
-        # content = get_content(response)
+
         self.driver.get(url)
-        wait = WebDriverWait(self.driver, 10)
-        wait.until(is_document_ready)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        # Extract HTML content
-        content = self.driver.page_source
+        time.sleep(2)  # Wait for the page to load
+        content = self.driver.execute_script(
+            "return document.documentElement.outerHTML"
+        )
 
         soup = BeautifulSoup(content, "lxml")
 
-        for tag in soup.find_all(["link", "script", "img", "iframe"]):
+        loaded = []
+        for tag in soup.find_all(["link", "script", "img"]):
+            loaded.append(tag)
             if tag.name in ["img"] and tag.get("src"):
                 img_url = tag["src"]
                 # if it is a base64 encoded image, we can directly embed it
                 if img_url.startswith("data:"):
-                    logger.debug(f"Embedding base64 image {img_url}")
+                    logger.debug(f"Embedding base64 image {urlparse(img_url).path}")
                     tag["src"] = img_url
                     continue
 
                 # if its is svg, we can directly embed it
                 img_data = self.fetch_data(ContentType.IMG, img_url, url)
                 if is_svg(img_url):
-                    logger.debug(f"Embedding svg image {img_url}")
                     # parse the svg content and embed it
-                    svg_soup = BeautifulSoup(img_data, "lxml")
+                    if isinstance(img_data, bytes):
+                        logger.debug(
+                            f"Decompressing svg image {urlparse(img_url).path}"
+                        )
+                        img_data = brotli.decompress(img_data).decode("utf-8")
+                    logger.debug(f"Embedding svg image {urlparse(img_url).path}")
+                    svg_soup = BeautifulSoup(img_data, "xml")
                     # replace with svg tag
                     tag.replace_with(svg_soup.find("svg"))
                 else:
                     tag["src"] = f"data:image/jpeg;base64,{img_data}"
             elif tag.name == "script" and tag.get("src"):
+                # TODO: maybe we can just remove all javascript
+                # del tag
                 js_url = tag["src"]
-                tag.string = html.escape(self.fetch_data(ContentType.JS, js_url, url))
+                tag.string = sanitize_inline_js(
+                    self.fetch_data(ContentType.JS, js_url, url)
+                )
                 del tag["src"]
-            elif tag.name == "link" and tag.get("rel") == ["stylesheet"] and tag.get("href"):
+            elif (
+                tag.name == "link"
+                and tag.get("rel") == ["stylesheet"]
+                and tag.get("href")
+            ):
                 css_url = tag["href"]
                 style_tag = soup.new_tag("style")
                 sheet = self.fetch_data(ContentType.CSS, css_url, url)
@@ -144,12 +168,15 @@ class Scraper:
             #     iframe_content = self.fetch_html(iframe_url)
             #     tag.replace_with(iframe_content)
 
+        logger.debug(f"Loaded {len(loaded)} elements")
         return soup.prettify()
 
     def fetch_data(self, content_type, url, referrer=None):
         if not url.startswith("http"):
             url = urljoin(referrer, url)
-        logger.debug(f"Fetching {content_type} from {url} (referrer {referrer})")
+        logger.debug(
+            f"Fetching {content_type} from {urlparse(url).path.split('/')[-1]} (referrer {referrer})"
+        )
         self.session.headers = get_header(content_type, referrer)
         try:
             response = self.session.get(url, stream=True)
