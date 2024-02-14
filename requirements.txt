@@ -1,7 +1,8 @@
-beautifulsoup4
-brotli
-click
-loguru
+beautifulsoup4~=4.12.3
+brotli~=1.1.0
+click~=8.1.7
+loguru~=0.7.2
 lxml
-requests
-selenium
+requests~=2.31.0
+selenium~=4.17.2
+playwright~=1.41.2

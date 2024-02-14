@@ -1,5 +1,4 @@
 import base64
-import time
 from enum import Enum
 from urllib.parse import urljoin, urlparse
 
@@ -8,8 +7,8 @@ import click
 import requests
 from bs4 import BeautifulSoup
 from loguru import logger
-from selenium import webdriver
-from selenium.webdriver.support import expected_conditions as EC  # noqa
+from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 BASE_HEADER = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
@@ -88,36 +87,37 @@ def is_svg(url):
 
 
 class Scraper:
-    def __init__(self):
+    def __init__(self, page):
         self.session = requests.Session()
 
-        # Set up headless Chrome browser
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--disable-gpu")
-        # TODO: using tmpdir causes errors, find out why.
-        options.add_argument(
-            "--user-data-dir=/home/kureta/.cache/chromium/scraper-profile"
-        )
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-notifications")
-        self.driver = webdriver.Chrome(options=options)
-        self.driver.set_window_size(1920, 1080)
-
-    def __del__(self):
-        # Close the browser
-        self.driver.quit()
+        self.page = page
+        stealth_sync(self.page)
 
     def fetch_html(self, url):
         logger.debug(f"Fetching html content from {url}")
 
-        self.driver.get(url)
-        time.sleep(2)  # Wait for the page to load
-        content = self.driver.execute_script(
-            "return document.documentElement.outerHTML"
-        )
+        self.page.goto(url)
+        self.page.wait_for_load_state("networkidle")
+
+        # save screenshot
+        self.page.screenshot(path='output.png', full_page=True)
+
+        # save pdf
+        client = self.page.context.new_cdp_session(self.page)
+        data = client.send("Page.printToPDF", {"landscape": False, "displayHeaderFooter": False})
+        with open('output.pdf', 'wb') as f:
+            f.write(base64.b64decode(data["data"]))
+
+        # get html content after all resources are loaded
+        content = self.page.evaluate('''() => {
+            return document.documentElement.outerHTML;
+        }''')
 
         soup = BeautifulSoup(content, "lxml")
+
+        # Create a new BeautifulSoup object for the DOCTYPE declaration
+        doctype_soup = BeautifulSoup('<!DOCTYPE html>', "lxml")
+        soup.insert(0, doctype_soup)
 
         loaded = []
         for tag in soup.find_all(["link", "script", "img"]):
@@ -153,11 +153,7 @@ class Scraper:
                     self.fetch_data(ContentType.JS, js_url, url)
                 )
                 del tag["src"]
-            elif (
-                tag.name == "link"
-                and tag.get("rel") == ["stylesheet"]
-                and tag.get("href")
-            ):
+            elif tag.name == "link" and tag.get("rel") == ["stylesheet"] and tag.get("href"):
                 css_url = tag["href"]
                 style_tag = soup.new_tag("style")
                 sheet = self.fetch_data(ContentType.CSS, css_url, url)
@@ -195,8 +191,26 @@ def cli():
 @cli.command()
 @click.argument("url")
 def scrape(url: str):
-    scraper = Scraper()
-    html_content = scraper.fetch_html(url)
+    # Set up headless Chrome browser
+    args = [
+        '--no-sandbox',
+        '--disable-infobars',
+        '--lang=en-US',
+        '--start-maximized',
+        '--window-position=-10,0',
+    ]
+    ignoreDefaultArgs = ['--enable-automation']
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir='/home/kureta/.cache/chromium/scraper-profile',
+            args=args, ignore_default_args=ignoreDefaultArgs,
+            headless=True,
+            viewport={'width': 1920, 'height': 1080}
+        )
+        page = browser.new_page()
+        scraper = Scraper(page)
+        html_content = scraper.fetch_html(url)
+        browser.close()
 
     with open("output.html", "w") as f:
         f.write(html_content)
