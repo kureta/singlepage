@@ -1,4 +1,5 @@
 import base64
+import re
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -58,13 +59,7 @@ accept = {
 
 
 def sanitize_inline_js(html_content):
-    # TODO: Also remove events, don't know why
-    # Remove event attributes such as onclick, onmouseover, etc.
-    # sanitized_content = re.sub(r"\bon\w+\s*=\s*['\"].*?['\"]", "", html_content, flags=re.IGNORECASE)
-
-    # Escape JavaScript content by replacing < and > with HTML entities
-    sanitized_content = html_content.replace("<", "&lt;").replace(">", "&gt;")
-
+    sanitized_content = re.sub(r'</\w+>', lambda match: match.group().replace('</', r'<\/'), html_content)
     return sanitized_content
 
 
@@ -120,20 +115,28 @@ class Scraper:
         # load page
         self.page.goto(url)
         self.page.wait_for_load_state("networkidle")
-        content = self.page.content()
 
         # get title
         title = self.page.title()
         # make filename
         path = title[:128] if title else urlparse(url).path[:128]
+        # remove invalid characters
+        path = re.sub(r'[^\w\s-]', '_', path)
 
         # save screenshot
         self.save_screenshot(f"{path}.png")
         # save pdf
         self.save_pdf(f'{path}.pdf')
 
+        # TODO: decide between page.content() and outerHTML
+        # content = self.page.content()
+        # run javascript to get outerHTML from playwright
+        content = self.page.evaluate("document.documentElement.outerHTML")
+        # prepend doc type
+        content = f"<!DOCTYPE html>\n{content}"
         # parse html content
-        soup = BeautifulSoup(content, "lxml")
+        # TODO: decide between lxml and html.parser
+        soup = BeautifulSoup(content, "html.parser")
 
         loaded = []
         for tag in soup.find_all(["link", "script", "img"]):
@@ -163,12 +166,12 @@ class Scraper:
                     tag["src"] = f"data:image/jpeg;base64,{img_data}"
             elif tag.name == "script" and tag.get("src"):
                 # TODO: maybe we can just remove all javascript
-                # del tag
                 js_url = tag["src"]
-                tag.string = sanitize_inline_js(
-                    self.fetch_data(ContentType.JS, js_url, url)
-                )
-                del tag["src"]
+                script = self.fetch_data(ContentType.JS, js_url, url)
+                script_tag = soup.new_tag("script")
+                script_tag['type'] = 'text/javascript'
+                script_tag.string = sanitize_inline_js(script)
+                tag.replace_with(script_tag)
             elif tag.name == "link" and tag.get("rel") == ["stylesheet"] and tag.get("href"):
                 css_url = tag["href"]
                 style_tag = soup.new_tag("style")
