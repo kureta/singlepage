@@ -1,5 +1,6 @@
 import base64
 from enum import Enum
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import brotli
@@ -22,6 +23,14 @@ BASE_HEADER = {
     "Sec-Fetch-Site": "cross-site",
     "Sec-GPC": "1",
 }
+
+# TODO: this is a mess
+ublock_version = "1.55.1rc2"
+ublock_zip_name = f"uBlock0_{ublock_version}.chromium.zip"
+ublock_download_url = f"https://github.com/gorhill/uBlock/releases/download/{ublock_version}/{ublock_zip_name}"
+ublock_download_destination = Path.home() / ".cache" / "singlepage"
+ublock_zip_path = ublock_download_destination / ublock_zip_name
+ublock_path = ublock_download_destination / f"uBlock0_{ublock_version}.chromium" / "uBlock0.chromium" / "uBlock0.chromium"
 
 
 # TODO: implement other content types
@@ -86,6 +95,7 @@ def is_svg(url):
     return path.endswith(".svg")
 
 
+# TODO: Download in a structured way, not just in the current directory
 class Scraper:
     def __init__(self, page: Page):
         self.session = requests.Session()
@@ -172,7 +182,11 @@ class Scraper:
                 # tag.replace_with(iframe_content)
 
         logger.debug(f"Loaded {len(loaded)} elements")
-        return soup.prettify()
+
+        with open(f'{path}.html', "w") as f:
+            f.write(soup.prettify())
+
+        logger.info("HTML content saved to output.html")
 
     def fetch_data(self, content_type, url, referrer=None):
         if not url.startswith("http"):
@@ -195,9 +209,30 @@ def cli():
     pass
 
 
+def prepare_extension():
+    # check if extension is already downloaded
+    if ublock_path.exists():
+        logger.debug(f"uBlock extension already downloaded at {ublock_path}")
+        return
+    # download uBlock extension
+    logger.debug(f"Downloading uBlock extension from {ublock_download_url}")
+    response = requests.get(ublock_download_url)
+    response.raise_for_status()
+    ublock_download_destination.mkdir(parents=True, exist_ok=True)
+    with open(ublock_zip_path, "wb") as f:
+        f.write(response.content)
+    # unzip the extension
+    import zipfile
+    with zipfile.ZipFile(ublock_zip_path, 'r') as zip_ref:
+        zip_ref.extractall(ublock_path)
+    # remove the zip file
+    ublock_zip_path.unlink()
+
+
 @cli.command()
 @click.argument("url")
 def scrape(url: str):
+    prepare_extension()
     # Set up headless Chrome browser
     args = [
         '--no-sandbox',
@@ -205,6 +240,9 @@ def scrape(url: str):
         '--lang=en-US',
         '--start-maximized',
         '--window-position=-10,0',
+        f"--disable-extensions-except={ublock_path}",
+        f"--load-extension={ublock_path}",
+        "--headless=new",
     ]
     ignoreDefaultArgs = ['--enable-automation']
 
@@ -212,19 +250,14 @@ def scrape(url: str):
         browser = p.chromium.launch_persistent_context(
             user_data_dir='/home/kureta/.cache/chromium/scraper-profile',
             args=args, ignore_default_args=ignoreDefaultArgs,
-            headless=True,
-            viewport={'width': 1920, 'height': 1080}
+            headless=False,
+            viewport={'width': 1920, 'height': 1080},
         )
 
         page = browser.new_page()
         scraper = Scraper(page)
-        html_content = scraper.fetch_html(url)
+        scraper.fetch_html(url)
         browser.close()
-
-    with open("output.html", "w") as f:
-        f.write(html_content)
-
-    logger.info("HTML content saved to output.html")
 
 
 if __name__ == "__main__":
