@@ -25,12 +25,12 @@ BASE_HEADER = {
 }
 
 # TODO: this is a mess
-ublock_version = "1.55.1rc2"
-ublock_zip_name = f"uBlock0_{ublock_version}.chromium.zip"
-ublock_download_url = f"https://github.com/gorhill/uBlock/releases/download/{ublock_version}/{ublock_zip_name}"
-ublock_download_destination = Path.home() / ".cache" / "singlepage"
-ublock_zip_path = ublock_download_destination / ublock_zip_name
-ublock_path = ublock_download_destination / f"uBlock0_{ublock_version}.chromium" / "uBlock0.chromium" / "uBlock0.chromium"
+ub_version = "1.55.1rc2"
+ub_zip_name = f"uBlock0_{ub_version}.chromium.zip"
+ub_download_url = f"https://github.com/gorhill/uBlock/releases/download/{ub_version}/{ub_zip_name}"
+ub_download_destination = Path.home() / ".cache" / "singlepage"
+ub_zip_path = ub_download_destination / ub_zip_name
+ub_path = ub_download_destination / f"uBlock0_{ub_version}.chromium" / "uBlock0.chromium" / "uBlock0.chromium"
 
 
 # TODO: implement other content types
@@ -211,22 +211,22 @@ def cli():
 
 def prepare_extension():
     # check if extension is already downloaded
-    if ublock_path.exists():
-        logger.debug(f"uBlock extension already downloaded at {ublock_path}")
+    if ub_path.exists():
+        logger.debug(f"uBlock extension already downloaded at {ub_path}")
         return
     # download uBlock extension
-    logger.debug(f"Downloading uBlock extension from {ublock_download_url}")
-    response = requests.get(ublock_download_url)
+    logger.debug(f"Downloading uBlock extension from {ub_download_url}")
+    response = requests.get(ub_download_url)
     response.raise_for_status()
-    ublock_download_destination.mkdir(parents=True, exist_ok=True)
-    with open(ublock_zip_path, "wb") as f:
+    ub_download_destination.mkdir(parents=True, exist_ok=True)
+    with open(ub_zip_path, "wb") as f:
         f.write(response.content)
     # unzip the extension
     import zipfile
-    with zipfile.ZipFile(ublock_zip_path, 'r') as zip_ref:
-        zip_ref.extractall(ublock_path)
+    with zipfile.ZipFile(ub_zip_path, 'r') as zip_ref:
+        zip_ref.extractall(ub_path)
     # remove the zip file
-    ublock_zip_path.unlink()
+    ub_zip_path.unlink()
 
 
 @cli.command()
@@ -240,8 +240,8 @@ def scrape(url: str):
         '--lang=en-US',
         '--start-maximized',
         '--window-position=-10,0',
-        f"--disable-extensions-except={ublock_path}",
-        f"--load-extension={ublock_path}",
+        f"--disable-extensions-except={ub_path}",
+        f"--load-extension={ub_path}",
         "--headless=new",
     ]
     ignoreDefaultArgs = ['--enable-automation']
